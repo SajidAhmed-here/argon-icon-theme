@@ -22,15 +22,16 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      # A space also checks that the Makefile correctly quotes custom prefixes.
-      PREFIX_DIR: ${{ runner.temp }}/argon build test
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Set isolated installation prefix
+        # Runner paths are available at step execution time, not in job-level env.
+        # A space also checks that the Makefile correctly quotes custom prefixes.
+        run: echo "PREFIX_DIR=$RUNNER_TEMP/argon build test" >> "$GITHUB_ENV"
 
       - name: Install build dependencies
         # The executable scripts use /usr/bin/python3 directly (Python 3.9+).
