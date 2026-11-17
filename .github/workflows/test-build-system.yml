@@ -1,39 +1,97 @@
-# This workflow will test the build system (validate symlinks, index generator and installing / uninstalling)
+# Exercise the existing Makefile without changing source files or system icons.
 name: Complete build system test
 
 on:
   push:
-    branches: '**'
+    branches: ['**']
   pull_request:
-    branches: '**'
+    branches: ['**']
   release:
     types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Same-repository pull requests are already covered by the push event.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
+    defaults:
+      run:
+        shell: bash
+    env:
+      # A space also checks that the Makefile correctly quotes custom prefixes.
+      PREFIX_DIR: ${{ runner.temp }}/argon build test
 
     steps:
-    - uses: actions/checkout@v7
-    - name: Set up Python 3.15
-      uses: actions/setup-python@v7
-      with:
-        python-version: '3.15'
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-    - name: Install build dependencies
-      run: |
-        sudo apt-get install --no-install-recommends make
+      - name: Install build dependencies
+        # The executable scripts use /usr/bin/python3 directly (Python 3.9+).
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bash make python3 libgtk-3-bin
+          /usr/bin/python3 -c 'import sys; assert sys.version_info >= (3, 9), sys.version'
+          command -v gtk-update-icon-cache
 
-    - name: Check all symlinks are valid
-      run: |
-        make check
+      - name: Check all symlinks are valid
+        run: make check
 
-    - name: Test index generator
-      run: |
-        PREFIX_DIR=./ make index
+      - name: Test index generator
+        run: |
+          make index
+          test -s "$PREFIX_DIR/share/icons/Argon/index.theme"
 
-    - name: Test install and uninstall targets
-      run: |
-        sudo make install
-        sudo make uninstall
+      - name: Test installation and reinstallation
+        run: |
+          make install
+          make install
+
+      - name: Verify installed theme and aliases
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import configparser
+          import csv
+          import os
+          from pathlib import Path
+
+          theme = Path(os.environ['PREFIX_DIR']) / 'share/icons/Argon'
+          index = configparser.ConfigParser(interpolation=None)
+          index.read(theme / 'index.theme')
+          assert index['Icon Theme']['Name'] == 'Argon'
+          with open('index/context.csv', newline='') as stream:
+              expected = [f'{row[2]}/{row[0]}' for row in csv.reader(stream)]
+          assert index['Icon Theme']['Directories'].split(',') == expected
+          for context in expected:
+              assert context in index and (theme / context).is_dir(), context
+          for source in Path('argon').glob('*/*/*.svg'):
+              installed = theme / source.relative_to('argon')
+              assert installed.read_bytes() == source.read_bytes(), installed
+          for definition in Path('argon/symlinks').glob('*.list'):
+              context = definition.stem
+              kind = 'symbolic' if context.endswith('-symbolic') else 'scalable'
+              directory = theme / kind / context.removesuffix('-symbolic')
+              for line in definition.read_text().splitlines():
+                  alias, target = line.split(' -> ')
+                  assert (directory / alias).read_bytes() == (directory / target).read_bytes(), alias
+          assert (theme / 'icon-theme.cache').stat().st_size > 0
+          PY
+
+      - name: Test cache refresh
+        run: |
+          make refresh
+          test -s "$PREFIX_DIR/share/icons/Argon/icon-theme.cache"
+
+      - name: Test uninstallation
+        run: |
+          make uninstall
+          test ! -e "$PREFIX_DIR/share/icons/Argon"
+
+      - name: Verify original files are unchanged
+        run: git diff --exit-code
